@@ -72,6 +72,7 @@ export const NON_PCM_AUDIO_CODECS = [
 	'flac',
 	'ac3',
 	'eac3',
+	'dts',
 ] as const;
 /**
  * List of known audio codecs, ordered by encoding preference.
@@ -534,6 +535,8 @@ export const buildAudioCodecString = (codec: AudioCodec, numberOfChannels: numbe
 		return 'ac-3';
 	} else if (codec === 'eac3') {
 		return 'ec-3';
+	} else if (codec === 'dts') {
+		return 'dts'; // DTS codec string (used for dtsc/dtsh/dtsl/dtse sample entries)
 	} else if ((PCM_AUDIO_CODECS as readonly string[]).includes(codec)) {
 		return codec;
 	}
@@ -575,6 +578,8 @@ export const extractAudioCodecString = (trackInfo: {
 		return 'ac-3';
 	} else if (codec === 'eac3') {
 		return 'ec-3';
+	} else if (codec === 'dts') {
+		return 'dts';
 	} else if (codec && (PCM_AUDIO_CODECS as readonly string[]).includes(codec)) {
 		return codec;
 	}
@@ -748,6 +753,8 @@ export const inferCodecFromCodecString = (codecString: string): MediaCodec | nul
 		return 'ac3';
 	} else if (codecString === 'ec-3' || codecString === 'eac3') {
 		return 'eac3';
+	} else if (codecString.startsWith('dts')) {
+		return 'dts';
 	} else if (codecString === 'ulaw') {
 		return 'ulaw';
 	} else if (codecString === 'alaw') {
@@ -940,7 +947,7 @@ export const validateVideoChunkMetadata = (metadata: EncodedVideoChunkMetadata |
 };
 
 const VALID_AUDIO_CODEC_STRING_PREFIXES = [
-	'mp4a', 'mp3', 'opus', 'vorbis', 'flac', 'ulaw', 'alaw', 'pcm', 'ac-3', 'ec-3',
+	'mp4a', 'mp3', 'opus', 'vorbis', 'flac', 'ulaw', 'alaw', 'pcm', 'ac-3', 'ec-3', 'dts',
 ];
 
 export const validateAudioChunkMetadata = (metadata: EncodedAudioChunkMetadata | undefined) => {
@@ -1086,6 +1093,19 @@ export const validateAudioChunkMetadata = (metadata: EncodedAudioChunkMetadata |
 			throw new TypeError(
 				'Audio chunk metadata decoder configuration description for EC-3, when provided, must be at least 5'
 				+ ' bytes and is expected to be a dec3 box payload as specified in ETSI TS 102 366.',
+			);
+		}
+	} else if (metadata.decoderConfig.codec.startsWith('dts')) {
+		// DTS-specific validation
+
+		if (metadata.decoderConfig.codec !== 'dts') {
+			throw new TypeError('Audio chunk metadata decoder configuration codec string for DTS must be "dts".');
+		}
+
+		if (metadata.decoderConfig.description && metadata.decoderConfig.description.byteLength < 20) {
+			throw new TypeError(
+				'Audio chunk metadata decoder configuration description for DTS, when provided, must be at least 20'
+				+ ' bytes and is expected to be a ddts box payload as specified in ETSI TS 102 114.',
 			);
 		}
 	} else if (

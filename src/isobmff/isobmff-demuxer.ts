@@ -33,6 +33,9 @@ import {
 	getEAC3ChannelCount,
 	AC3_SAMPLE_RATES,
 	AC3_ACMOD_CHANNEL_COUNTS,
+	parseDTSConfig,
+	getDTSChannelCount,
+	getDTSSampleRate,
 } from '../codec-data';
 import { Demuxer } from '../demuxer';
 import { Input } from '../input';
@@ -962,6 +965,14 @@ export class IsobmffDemuxer extends Demuxer {
 							track.info.codec = 'ac3';
 						} else if (lowercaseBoxName === 'ec-3') {
 							track.info.codec = 'eac3';
+						} else if (
+							lowercaseBoxName === 'dtsc'
+							|| lowercaseBoxName === 'dtsh'
+							|| lowercaseBoxName === 'dtsl'
+							|| lowercaseBoxName === 'dtse'
+						) {
+							// DTS sample entries (ETSI TS 102 114)
+							track.info.codec = 'dts';
 						} else {
 							console.warn(`Unsupported audio codec (sample entry type '${sampleBoxInfo.name}').`);
 						}
@@ -1250,6 +1261,13 @@ export class IsobmffDemuxer extends Demuxer {
 					track.info.codec = 'mp3';
 				} else if (objectTypeIndication === 0xdd) {
 					track.info.codec = 'vorbis'; // "nonstandard, gpac uses it" - FFmpeg
+				} else if (
+					objectTypeIndication === 0xA9
+					|| objectTypeIndication === 0xAC
+					|| objectTypeIndication === 0xAA
+					|| objectTypeIndication === 0xAB)
+						{
+					track.info.codec = 'dts';
 				} else {
 					console.warn(
 						`Unsupported audio codec (objectTypeIndication ${objectTypeIndication}) - discarding track.`,
@@ -1501,6 +1519,24 @@ export class IsobmffDemuxer extends Demuxer {
 				if (config) {
 					track.info.sampleRate = getEAC3SampleRate(config);
 					track.info.numberOfChannels = getEAC3ChannelCount(config);
+				}
+
+				track.info.codecDescription = bytes;
+			}; break;
+
+			case 'ddts': { // DTSSpecificBox (ETSI TS 102 114, Annex E.2)
+				const track = this.currentTrack;
+				if (!track) {
+					break;
+				}
+				assert(track.info?.type === 'audio');
+
+				const bytes = readBytes(slice, boxInfo.contentSize);
+				const config = parseDTSConfig(bytes);
+
+				if (config) {
+					track.info.sampleRate = getDTSSampleRate(config);
+					track.info.numberOfChannels = getDTSChannelCount(config);
 				}
 
 				track.info.codecDescription = bytes;

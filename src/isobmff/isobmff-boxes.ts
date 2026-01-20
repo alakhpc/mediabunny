@@ -919,6 +919,12 @@ const dec3 = (trackData: IsobmffAudioTrackData) => {
 	return box('dec3', [...bytes]);
 };
 
+/** DTSSpecificBox */
+const ddts = (trackData: IsobmffAudioTrackData) => {
+	const bytes = toUint8Array(trackData.info.decoderConfig.description!);
+	return box('ddts', [...bytes]);
+};
+
 export const subtitleSampleDescription = (
 	compressionType: string,
 	trackData: IsobmffSubtitleTrackData,
@@ -1620,6 +1626,9 @@ const audioCodecToBoxName = (codec: AudioCodec, isQuickTime: boolean): string =>
 		case 'pcm-s8': return 'sowt';
 		case 'ac3': return 'ac-3';
 		case 'eac3': return 'ec-3';
+		// DTS sample entry names: dtsc, dtsh, dtsl, dtse (based on StreamConstruction)
+		// TODO: Select proper sample entry based on StreamConstruction field in ddts box
+		case 'dts': return 'dtsc'; // Default to DTS Core for now
 	}
 
 	// Logic diverges here
@@ -1661,6 +1670,7 @@ const audioCodecToConfigurationBox = (codec: AudioCodec, isQuickTime: boolean) =
 		case 'flac': return dfLa;
 		case 'ac3': return dac3;
 		case 'eac3': return dec3;
+		case 'dts': return ddts;
 	}
 
 	// Logic diverges here

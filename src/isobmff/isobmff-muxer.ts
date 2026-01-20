@@ -35,6 +35,9 @@ import {
 	serializeEAC3Config,
 	serializeAvcDecoderConfigurationRecord,
 	serializeHevcDecoderConfigurationRecord,
+	parseDTSCoreFrame,
+	createDTSConfigFromCoreFrame,
+	serializeDTSConfig,
 } from '../codec-data';
 import { buildIsobmffMimeType } from './isobmff-misc';
 import { MAX_BOX_HEADER_SIZE, MIN_BOX_HEADER_SIZE } from './isobmff-reader';
@@ -404,6 +407,19 @@ export class IsobmffMuxer extends Muxer {
 				);
 			}
 			decoderConfig.description = serializeEAC3Config(config);
+		}
+
+		// Parse DTS Core frame if no description provided
+		if (track.source._codec === 'dts' && !decoderConfig.description) {
+			const frameInfo = parseDTSCoreFrame(packet.data);
+			if (!frameInfo) {
+				throw new Error(
+					'Couldn\'t extract DTS frame info from the audio packet. '
+					+ 'Ensure the packets contain valid DTS Core frames (as specified in ETSI TS 102 114).',
+				);
+			}
+			const config = createDTSConfigFromCoreFrame(frameInfo);
+			decoderConfig.description = serializeDTSConfig(config);
 		}
 
 		const newTrackData: IsobmffAudioTrackData = {

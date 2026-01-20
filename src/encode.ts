@@ -377,6 +377,7 @@ export class Quality {
 			vorbis: 64000, // 64kbps base for Vorbis
 			ac3: 384000, // 384kbps base for AC-3 (Dolby Digital)
 			eac3: 384000, // 384kbps base for E-AC-3 (Dolby Digital Plus)
+			dts: 1509000, // ~1.5Mbps base for DTS (typical for 5.1 DTS Core)
 		};
 
 		const baseBitrate = baseRates[codec as keyof typeof baseRates];

@@ -2599,3 +2599,453 @@ export const getEAC3ChannelCount = (config: EAC3Config): number => {
 
 	return channels;
 };
+
+// ============================================================================
+// DTS / DTS-HD Parsing
+// Reference: ETSI TS 102 114 V1.6.1
+// ============================================================================
+
+/** DTS Core frame sync words */
+export const DTS_SYNC_WORD_BE = 0x7FFE8001; // Big-endian 16-bit
+export const DTS_SYNC_WORD_LE = 0xFE7F0180; // Little-endian 16-bit
+export const DTS_SYNC_WORD_14BIT_BE = 0x1FFFE800; // 14-bit big-endian
+export const DTS_SYNC_WORD_14BIT_LE = 0xFF1F00E8; // 14-bit little-endian
+
+/** DTS sample rate table (Table 5.5) */
+export const DTS_SAMPLE_RATES = [
+	0, 8000, 16000, 32000, 0, 0, 11025, 22050,
+	44100, 0, 0, 12000, 24000, 48000, 96000, 192000,
+] as const;
+
+/** DTS bitrate table in kbps (Table 5.7) */
+export const DTS_BITRATES = [
+	32, 56, 64, 96, 112, 128, 192, 224,
+	256, 320, 384, 448, 512, 576, 640, 768,
+	896, 1024, 1152, 1280, 1344, 1408, 1411.2, 1472,
+	1536, 1920, 2048, 3072, 3840, 0, 0, 0, // 29=open, 30=variable, 31=lossless
+] as const;
+
+/**
+ * DTS AMODE to channel count mapping (Table 5.4).
+ * Does NOT include LFE.
+ */
+export const DTS_AMODE_CHANNEL_COUNTS = [
+	1, // 0: A (mono)
+	2, // 1: A + B (dual mono)
+	2, // 2: L + R (stereo)
+	2, // 3: (L+R) + (L-R) (sum-difference)
+	2, // 4: LT + RT (left and right total)
+	3, // 5: C + L + R
+	3, // 6: L + R + S
+	4, // 7: C + L + R + S
+	4, // 8: L + R + SL + SR
+	5, // 9: C + L + R + SL + SR
+	6, // 10: CL + CR + L + R + SL + SR
+	6, // 11: C + L + R + LR + RR + OV
+	6, // 12: CF + CR + LF + RF + LR + RR
+	7, // 13: CL + C + CR + L + R + SL + SR
+	8, // 14: CL + CR + L + R + SL1 + SL2 + SR1 + SR2
+	8, // 15: CL + C + CR + L + R + SL + S + SR
+] as const;
+
+/**
+ * DTS Core frame header info.
+ */
+export interface DTSCoreFrameInfo {
+	/** Frame type: 0 = normal, 1 = termination */
+	frameType: number;
+	/** Deficit sample count */
+	deficitSampleCount: number;
+	/** CRC present flag */
+	crcPresent: number;
+	/** Number of PCM sample blocks (NBLKS) */
+	numPcmBlocks: number;
+	/** Frame byte size (FSIZE) - actual size is FSIZE + 1 */
+	frameByteSize: number;
+	/** Audio channel arrangement (AMODE) */
+	amode: number;
+	/** Core audio sampling frequency code (SFREQ) */
+	sfreq: number;
+	/** Transmission bit rate index (RATE) */
+	rate: number;
+	/** Embedded downmix enabled */
+	embeddedDownmix: number;
+	/** Embedded dynamic range flag */
+	embeddedDynRange: number;
+	/** Embedded timestamp flag */
+	embeddedTimestamp: number;
+	/** Auxiliary data flag */
+	auxData: number;
+	/** HDCD flag */
+	hdcd: number;
+	/** Extension audio descriptor */
+	extAudioId: number;
+	/** Extended coding flag */
+	extAudio: number;
+	/** Audio sync word insertion flag */
+	aspf: number;
+	/** Low frequency effects flag */
+	lfe: number;
+	/** Predictor history switch flag */
+	predictor: number;
+	/** Header CRC check (if present) */
+	headerCrc: number | null;
+	/** Multirate interpolator switch */
+	multirate: number;
+	/** Encoder software revision */
+	encoderRevision: number;
+	/** Copy history */
+	copyHistory: number;
+	/** Source PCM resolution */
+	pcmResolution: number;
+	/** Front sum/difference flag */
+	frontSumDiff: number;
+	/** Surrounds sum/difference flag */
+	surroundSumDiff: number;
+	/** Dialog normalization parameter */
+	dialogNorm: number;
+}
+
+/**
+ * DTS configuration from ddts box (DTSSpecificBox).
+ * ETSI TS 102 114 V1.6.1, Annex E.2
+ */
+export interface DTSConfig {
+	/** DTS sampling frequency (32 bits) */
+	dtsSamplingFrequency: number;
+	/** Maximum bitrate in bits per second (32 bits) */
+	maxBitrate: number;
+	/** Average bitrate in bits per second (32 bits) */
+	avgBitrate: number;
+	/** PCM sample depth (8 bits) */
+	pcmSampleDepth: number;
+	/** Frame duration code (2 bits) */
+	frameDuration: number;
+	/** Stream construction code (5 bits) - determines sample entry type */
+	streamConstruction: number;
+	/** Core LFE present (1 bit) */
+	coreLfePresent: number;
+	/** Core layout code (6 bits) */
+	coreLayout: number;
+	/** Core size in bytes (14 bits) */
+	coreSize: number;
+	/** Stereo downmix present (1 bit) */
+	stereoDownmix: number;
+	/** Representation type (3 bits) */
+	representationType: number;
+	/** Channel layout mask (16 bits) */
+	channelLayout: number;
+	/** Multi-asset flag (1 bit) */
+	multiAssetFlag: number;
+	/** LBR duration modifier (1 bit) */
+	lbrDurationMod: number;
+	/** Reserved box present (1 bit) */
+	reservedBoxPresent: number;
+}
+
+/**
+ * Parse a DTS Core frame header to extract audio parameters.
+ * ETSI TS 102 114 V1.6.1, Section 5.3
+ */
+export const parseDTSCoreFrame = (data: Uint8Array): DTSCoreFrameInfo | null => {
+	if (data.length < 12) return null;
+
+	const view = toDataView(data);
+	const syncWord = view.getUint32(0, false);
+
+	// Check for valid sync word (only supporting 16-bit big-endian for now)
+	// TODO: Support other sync word variants if needed
+	if (syncWord !== DTS_SYNC_WORD_BE) return null;
+
+	const bitstream = new Bitstream(data);
+	bitstream.skipBits(32); // sync word
+
+	const frameType = bitstream.readBits(1);
+	const deficitSampleCount = bitstream.readBits(5);
+	const crcPresent = bitstream.readBits(1);
+	const numPcmBlocks = bitstream.readBits(7);
+	const frameByteSize = bitstream.readBits(14);
+	const amode = bitstream.readBits(6);
+	const sfreq = bitstream.readBits(4);
+	const rate = bitstream.readBits(5);
+	const embeddedDownmix = bitstream.readBits(1);
+	const embeddedDynRange = bitstream.readBits(1);
+	const embeddedTimestamp = bitstream.readBits(1);
+	const auxData = bitstream.readBits(1);
+	const hdcd = bitstream.readBits(1);
+	const extAudioId = bitstream.readBits(3);
+	const extAudio = bitstream.readBits(1);
+	const aspf = bitstream.readBits(1);
+	const lfe = bitstream.readBits(2);
+	const predictor = bitstream.readBits(1);
+
+	let headerCrc: number | null = null;
+	if (crcPresent) {
+		headerCrc = bitstream.readBits(16);
+	}
+
+	const multirate = bitstream.readBits(1);
+	const encoderRevision = bitstream.readBits(4);
+	const copyHistory = bitstream.readBits(2);
+	const pcmResolution = bitstream.readBits(3);
+	const frontSumDiff = bitstream.readBits(1);
+	const surroundSumDiff = bitstream.readBits(1);
+	const dialogNorm = bitstream.readBits(4);
+
+	return {
+		frameType,
+		deficitSampleCount,
+		crcPresent,
+		numPcmBlocks,
+		frameByteSize,
+		amode,
+		sfreq,
+		rate,
+		embeddedDownmix,
+		embeddedDynRange,
+		embeddedTimestamp,
+		auxData,
+		hdcd,
+		extAudioId,
+		extAudio,
+		aspf,
+		lfe,
+		predictor,
+		headerCrc,
+		multirate,
+		encoderRevision,
+		copyHistory,
+		pcmResolution,
+		frontSumDiff,
+		surroundSumDiff,
+		dialogNorm,
+	};
+};
+
+/**
+ * Parse a ddts box (DTSSpecificBox) to extract DTS parameters.
+ * ETSI TS 102 114 V1.6.1, Annex E.2
+ * Minimum size is 20 bytes.
+ */
+export const parseDTSConfig = (data: Uint8Array): DTSConfig | null => {
+	if (data.length < 20) return null;
+
+	const view = toDataView(data);
+
+	const dtsSamplingFrequency = view.getUint32(0, false);
+	const maxBitrate = view.getUint32(4, false);
+	const avgBitrate = view.getUint32(8, false);
+	const pcmSampleDepth = view.getUint8(12);
+
+	// Bytes 13-19 are bit-packed fields (56 bits = 7 bytes)
+	const bitstream = new Bitstream(data.subarray(13));
+
+	const frameDuration = bitstream.readBits(2);
+	const streamConstruction = bitstream.readBits(5);
+	const coreLfePresent = bitstream.readBits(1);
+	const coreLayout = bitstream.readBits(6);
+	const coreSize = bitstream.readBits(14);
+	const stereoDownmix = bitstream.readBits(1);
+	const representationType = bitstream.readBits(3);
+	const channelLayout = bitstream.readBits(16);
+	const multiAssetFlag = bitstream.readBits(1);
+	const lbrDurationMod = bitstream.readBits(1);
+	const reservedBoxPresent = bitstream.readBits(1);
+	// 5 bits reserved, not read
+
+	return {
+		dtsSamplingFrequency,
+		maxBitrate,
+		avgBitrate,
+		pcmSampleDepth,
+		frameDuration,
+		streamConstruction,
+		coreLfePresent,
+		coreLayout,
+		coreSize,
+		stereoDownmix,
+		representationType,
+		channelLayout,
+		multiAssetFlag,
+		lbrDurationMod,
+		reservedBoxPresent,
+	};
+};
+
+/**
+ * Serialize DTS config to ddts box format (20 bytes minimum).
+ * ETSI TS 102 114 V1.6.1, Annex E.2
+ */
+export const serializeDTSConfig = (config: DTSConfig): Uint8Array => {
+	const bytes = new Uint8Array(20);
+	const view = toDataView(bytes);
+
+	view.setUint32(0, config.dtsSamplingFrequency, false);
+	view.setUint32(4, config.maxBitrate, false);
+	view.setUint32(8, config.avgBitrate, false);
+	view.setUint8(12, config.pcmSampleDepth);
+
+	// Pack bit fields into bytes 13-19
+	const bitstream = new Bitstream(bytes.subarray(13));
+
+	bitstream.writeBits(2, config.frameDuration);
+	bitstream.writeBits(5, config.streamConstruction);
+	bitstream.writeBits(1, config.coreLfePresent);
+	bitstream.writeBits(6, config.coreLayout);
+	bitstream.writeBits(14, config.coreSize);
+	bitstream.writeBits(1, config.stereoDownmix);
+	bitstream.writeBits(3, config.representationType);
+	bitstream.writeBits(16, config.channelLayout);
+	bitstream.writeBits(1, config.multiAssetFlag);
+	bitstream.writeBits(1, config.lbrDurationMod);
+	bitstream.writeBits(1, config.reservedBoxPresent);
+	bitstream.writeBits(5, 0); // reserved
+
+	return bytes;
+};
+
+/**
+ * Get channel count from DTS config using ChannelLayout mask.
+ * ETSI TS 102 114 V1.6.1, Table E.3
+ */
+export const getDTSChannelCount = (config: DTSConfig): number => {
+	// ChannelLayout is a 16-bit mask indicating which channels are present
+	// Count the number of set bits
+	let count = 0;
+	let layout = config.channelLayout;
+
+	// Special case: if channelLayout is 0, fall back to coreLayout
+	if (layout === 0 && config.coreLayout < DTS_AMODE_CHANNEL_COUNTS.length) {
+		return DTS_AMODE_CHANNEL_COUNTS[config.coreLayout]! + config.coreLfePresent;
+	}
+
+	while (layout) {
+		count += layout & 1;
+		layout >>>= 1;
+	}
+
+	return count || 2; // Default to stereo if nothing found
+};
+
+/**
+ * Get sample rate from DTS config.
+ */
+export const getDTSSampleRate = (config: DTSConfig): number => {
+	return config.dtsSamplingFrequency || 48000;
+};
+
+/**
+ * Create a DTSConfig from a DTS Core frame.
+ * This is useful when demuxing from containers that don't provide ddts box.
+ */
+export const createDTSConfigFromCoreFrame = (frame: DTSCoreFrameInfo): DTSConfig => {
+	const sampleRate = DTS_SAMPLE_RATES[frame.sfreq] || 48000;
+	const bitrateKbps = DTS_BITRATES[frame.rate] || 1536;
+	const bitrate = Math.round(bitrateKbps * 1000);
+
+	// PCM resolution: bits 0-2 encode source PCM resolution
+	// 0=16, 1=16, 2=20, 3=20, 4=24, 5=24 (Table 5.12)
+	const pcmResolutionTable = [16, 16, 20, 20, 24, 24, 24, 24];
+	const pcmSampleDepth = pcmResolutionTable[frame.pcmResolution] ?? 16;
+
+	// Frame duration: derived from NBLKS
+	// NBLKS+1 gives number of 32-sample blocks
+	// 512 samples = 0, 1024 = 1, 2048 = 2, 4096 = 3
+	const samplesPerFrame = (frame.numPcmBlocks + 1) * 32;
+	let frameDuration = 0;
+	if (samplesPerFrame >= 4096) frameDuration = 3;
+	else if (samplesPerFrame >= 2048) frameDuration = 2;
+	else if (samplesPerFrame >= 1024) frameDuration = 1;
+
+	// LFE flag: 0=none, 1=128, 2=64, 3=reserved
+	const coreLfePresent = frame.lfe > 0 && frame.lfe < 3 ? 1 : 0;
+
+	// Core layout is AMODE
+	const coreLayout = frame.amode;
+
+	// Core size is FSIZE+1
+	const coreSize = frame.frameByteSize + 1;
+
+	// Build channel layout mask from AMODE
+	// This is a simplified mapping - real implementation would need full table
+	const channelLayout = buildChannelLayoutFromAmode(frame.amode, coreLfePresent);
+
+	return {
+		dtsSamplingFrequency: sampleRate,
+		maxBitrate: bitrate,
+		avgBitrate: bitrate,
+		pcmSampleDepth,
+		frameDuration,
+		streamConstruction: 0, // TODO: Determine proper value based on extensions
+		coreLfePresent,
+		coreLayout,
+		coreSize,
+		stereoDownmix: 0,
+		representationType: 0,
+		channelLayout,
+		multiAssetFlag: 0,
+		lbrDurationMod: 0,
+		reservedBoxPresent: 0,
+	};
+};
+
+/**
+ * Build a ChannelLayout mask from AMODE value.
+ * ETSI TS 102 114 V1.6.1, Table E.3
+ */
+const buildChannelLayoutFromAmode = (amode: number, lfe: number): number => {
+	// Channel layout bits (Table E.3):
+	// 0x0001 = C (center in front)
+	// 0x0002 = L+R (front)
+	// 0x0004 = Ls+Rs (surround)
+	// 0x0008 = LFE1
+	// 0x0010 = Cs (center surround in rear)
+	// ... and more
+
+	let layout = 0;
+
+	switch (amode) {
+		case 0: // A (mono)
+			layout = 0x0001; // C
+			break;
+		case 1: // A + B (dual mono)
+		case 2: // L + R (stereo)
+		case 3: // (L+R) + (L-R)
+		case 4: // LT + RT
+			layout = 0x0002; // L+R
+			break;
+		case 5: // C + L + R
+			layout = 0x0001 | 0x0002; // C + L+R
+			break;
+		case 6: // L + R + S
+			layout = 0x0002 | 0x0010; // L+R + Cs
+			break;
+		case 7: // C + L + R + S
+			layout = 0x0001 | 0x0002 | 0x0010; // C + L+R + Cs
+			break;
+		case 8: // L + R + SL + SR
+			layout = 0x0002 | 0x0004; // L+R + Ls+Rs
+			break;
+		case 9: // C + L + R + SL + SR (5.0)
+			layout = 0x0001 | 0x0002 | 0x0004; // C + L+R + Ls+Rs
+			break;
+		case 10: // CL + CR + L + R + SL + SR
+		case 11: // C + L + R + LR + RR + OV
+		case 12: // CF + CR + LF + RF + LR + RR
+			layout = 0x0001 | 0x0002 | 0x0004 | 0x0020; // Approximate
+			break;
+		case 13: // CL + C + CR + L + R + SL + SR
+		case 14: // CL + CR + L + R + SL1 + SL2 + SR1 + SR2
+		case 15: // CL + C + CR + L + R + SL + S + SR
+			layout = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0040; // Approximate
+			break;
+		default:
+			layout = 0x0002; // Default to stereo
+	}
+
+	if (lfe) {
+		layout |= 0x0008; // LFE1
+	}
+
+	return layout;
+};
